@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""
-Keystone x86 assembler — reads an .asm file, assembles it, outputs hex.
-
-Usage:
-    python3 assembler.py [file.asm]
-
-If no file is given, defaults to revshell.asm in the same directory.
-
-Output formats printed:
-    - Raw hex string  (paste into Wireshark / CyberChef)
-    - Python bytes    (paste directly into an exploit script)
-    - C byte array    (paste into a C/C++ exploit)
-    - Byte count + any null bytes flagged (bad character check)
-"""
 
 import sys
 import os
+import re
+import argparse
 from keystone import Ks, KS_ARCH_X86, KS_MODE_32, KsError
 
 
@@ -24,10 +12,88 @@ def strip_comments(asm: str) -> str:
     return "\n".join(line.split(";")[0] for line in asm.splitlines())
 
 
-def assemble(asm_path: str) -> bytes:
+def parse_badchars(raw: str) -> set:
+    """Parse a msfvenom-style bad character string into a set of ints.
+
+    Accepts formats like: "\\x00\\x0a\\x0d" or "00 0a 0d" or "00,0a,0d"
+    """
+    tokens = re.findall(r"[0-9a-fA-F]{2}", raw)
+    return set(int(t, 16) for t in tokens)
+
+
+def ror32(val: int, count: int) -> int:
+    return ((val >> count) | (val << (32 - count))) & 0xFFFFFFFF
+
+
+def ror13_hash(name: str) -> int:
+    """Compute the ROR-13 hash of a function name string (no null terminator)."""
+    h = 0
+    for i, c in enumerate(name):
+        h = (h + ord(c)) & 0xFFFFFFFF
+        if i < len(name) - 1:
+            h = ror32(h, 13)
+    return h
+
+
+def ip_to_dword(ip: str) -> str:
+    """Convert a dotted-decimal IP to a little-endian dword hex string.
+
+    e.g. "192.168.119.120" -> "0x7877a8c0"
+    """
+    octets = list(map(int, ip.split(".")))
+    if len(octets) != 4 or not all(0 <= o <= 255 for o in octets):
+        print(f"[!] Invalid IP address: {ip}")
+        sys.exit(1)
+    dword = (octets[3] << 24) | (octets[2] << 16) | (octets[1] << 8) | octets[0]
+    return f"0x{dword:08x}"
+
+
+def port_to_word(port: int) -> str:
+    """Convert a port number to its network byte order (big-endian) word hex string.
+
+    e.g. 443 (0x01bb) -> "0xbb01"  (bytes swapped for mov ax immediate)
+    """
+    if not (1 <= port <= 65535):
+        print(f"[!] Invalid port: {port}")
+        sys.exit(1)
+    swapped = ((port & 0xFF) << 8) | (port >> 8)
+    return f"0x{swapped:04x}"
+
+
+def apply_substitutions(asm_text: str, ip: str = None, port: int = None) -> str:
+    """Replace all placeholders in asm source before assembling.
+
+    Handles:
+      HASH_<FuncName>  ->  ROR-13 hash of FuncName as a hex immediate
+      LHOST_DWORD      ->  little-endian dword encoding of -i IP
+      LPORT_WORD       ->  network byte order word encoding of -p port
+    """
+    # HASH_<FuncName> substitution
+    for match in re.finditer(r"HASH_([A-Za-z0-9]+)", asm_text):
+        func_name = match.group(1)
+        h = ror13_hash(func_name)
+        asm_text = asm_text.replace(match.group(0), f"{h:#010x}")
+
+    if "LHOST_DWORD" in asm_text:
+        if ip is None:
+            print("[!] LHOST_DWORD found in asm but no -i <ip> provided.")
+            sys.exit(1)
+        asm_text = asm_text.replace("LHOST_DWORD", ip_to_dword(ip))
+
+    if "LPORT_WORD" in asm_text:
+        if port is None:
+            print("[!] LPORT_WORD found in asm but no -p <port> provided.")
+            sys.exit(1)
+        asm_text = asm_text.replace("LPORT_WORD", port_to_word(port))
+
+    return asm_text
+
+
+def assemble(asm_path: str, ip: str = None, port: int = None) -> bytes:
     with open(asm_path, "r") as f:
         raw = f.read()
 
+    raw = apply_substitutions(raw, ip, port)
     cleaned = strip_comments(raw)
 
     ks = Ks(KS_ARCH_X86, KS_MODE_32)
@@ -41,50 +107,83 @@ def assemble(asm_path: str) -> bytes:
     return bytes(encoding)
 
 
-def print_formats(shellcode: bytes) -> None:
-    # --- Raw hex string ---
-    hex_str = shellcode.hex()
-    print("[ Raw hex ]")
-    print(hex_str)
+def print_formats(shellcode: bytes, badchars: set, max_size: int = None) -> None:
+    BYTES_PER_LINE = 16
+
+    # --- Exploit-ready Python format (16 bytes per line) ---
+    print("[ Exploit-ready ]")
+    chunks = [
+        shellcode[i: i + BYTES_PER_LINE]
+        for i in range(0, len(shellcode), BYTES_PER_LINE)
+    ]
+    lines = ['b"' + "".join(f"\\x{b:02x}" for b in chunk) + '"' for chunk in chunks]
+    print("shellcode  = " + lines[0])
+    for line in lines[1:]:
+        print("shellcode += " + line)
     print()
 
-    # --- Python bytes literal ---
-    py_bytes = "shellcode = b\"" + "".join(f"\\x{b:02x}" for b in shellcode) + "\""
-    print("[ Python bytes ]")
-    print(py_bytes)
-    print()
+    # --- int3 check ---
+    if shellcode[0] == 0xcc:
+        print("[!] WARNING: shellcode starts with INT3 (0xcc) — remove the debug breakpoint!")
+        print()
 
-    # --- C byte array ---
-    c_array = "unsigned char shellcode[] = {\n    "
-    chunks = [f"0x{b:02x}" for b in shellcode]
-    # 12 bytes per line
-    lines = [", ".join(chunks[i:i+12]) for i in range(0, len(chunks), 12)]
-    c_array += ",\n    ".join(lines)
-    c_array += "\n};"
-    print("[ C array ]")
-    print(c_array)
-    print()
+    # --- Size check ---
+    if max_size is not None:
+        remaining = max_size - len(shellcode)
+        if remaining < 0:
+            print(f"[!] Size exceeded: {len(shellcode)} bytes / {max_size} limit ({-remaining} bytes over)")
+        else:
+            print(f"[+] Size ok: {len(shellcode)} / {max_size} bytes ({remaining} bytes remaining)")
+        print()
 
     # --- Bad character check ---
-    bad = [f"\\x{b:02x}" for b in shellcode if b == 0x00]
-    if bad:
-        print(f"[!] NULL bytes found ({len(bad)}): {', '.join(bad)}")
+    found = [(i, b) for i, b in enumerate(shellcode) if b in badchars]
+    if found:
+        print(f"[!] Bad characters found ({len(found)}):")
+        for offset, byte in found:
+            print(f"    offset {offset:#06x}  \\x{byte:02x}")
     else:
-        print("[+] No null bytes detected")
+        chars = ", ".join(f"\\x{b:02x}" for b in sorted(badchars))
+        print(f"[+] No bad characters detected  (checked: {chars})")
 
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    default_asm = os.path.join(script_dir, "revshell.asm")
 
-    if len(sys.argv) > 1:
-        asm_file = sys.argv[1]
-    else:
-        asm_file = os.path.join(script_dir, "revshell.asm")
+    parser = argparse.ArgumentParser(
+        description="Keystone x86 assembler — assembles an .asm file and outputs exploit-ready shellcode."
+    )
+    parser.add_argument(
+        "file", nargs="?", default=default_asm,
+        help="path to .asm file (default: revshell.asm)"
+    )
+    parser.add_argument(
+        "-i", dest="lhost", metavar="IP",
+        help="LHOST IP address — substitutes LHOST_DWORD in the asm"
+    )
+    parser.add_argument(
+        "-p", dest="lport", metavar="PORT", type=int,
+        help="LPORT port number — substitutes LPORT_WORD in the asm"
+    )
+    parser.add_argument(
+        "-b", dest="badchars", metavar="CHARS", default="",
+        help='bad character list in msfvenom format, e.g. "\\x00\\x0a\\x0d"'
+    )
+    parser.add_argument(
+        "-m", dest="max_size", metavar="BYTES", type=int,
+        help="warn if shellcode exceeds this size in bytes"
+    )
 
-    if not os.path.isfile(asm_file):
-        print(f"[!] File not found: {asm_file}")
+    args = parser.parse_args()
+
+    badchars = parse_badchars(args.badchars)
+    badchars.add(0x00)  # null is always a bad char
+
+    if not os.path.isfile(args.file):
+        print(f"[!] File not found: {args.file}")
         sys.exit(1)
 
-    print(f"[*] Assembling: {asm_file}\n")
-    shellcode = assemble(asm_file)
-    print_formats(shellcode)
+    print(f"[*] Assembling: {args.file}\n")
+    shellcode = assemble(args.file, args.lhost, args.lport)
+    print_formats(shellcode, badchars, args.max_size)
