@@ -152,7 +152,7 @@ def print_formats(shellcode: bytes, badchars: set, max_size: int = None) -> None
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_asm = os.path.join(script_dir, "revshell.asm")
+    default_asm = os.path.join(script_dir, "asm", "revshell.asm")
 
     parser = argparse.ArgumentParser(
         description="Keystone x86 assembler — assembles an .asm file and outputs exploit-ready shellcode."
