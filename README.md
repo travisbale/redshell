@@ -12,7 +12,7 @@ x86 Windows shellcode development environment for OSED (EXP-301).
 ## Requirements
 
 ```bash
-pip install keystone-engine
+pip install -r requirements.txt
 ```
 
 ## Usage

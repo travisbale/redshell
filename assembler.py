@@ -5,6 +5,7 @@ import os
 import re
 import argparse
 from keystone import Ks, KS_ARCH_X86, KS_MODE_32, KsError
+from capstone import Cs, CS_ARCH_X86, CS_MODE_32
 
 
 def strip_comments(asm: str) -> str:
@@ -142,9 +143,17 @@ def print_formats(shellcode: bytes, badchars: set, max_size: int = None) -> None
     # --- Bad character check ---
     found = [(i, b) for i, b in enumerate(shellcode) if b in badchars]
     if found:
+        # Build offset -> instruction map via Capstone
+        insn_map = {}
+        cs = Cs(CS_ARCH_X86, CS_MODE_32)
+        for insn in cs.disasm(shellcode, 0):
+            for i in range(insn.size):
+                insn_map[insn.address + i] = f"{insn.mnemonic} {insn.op_str}".strip()
+
         print(f"[!] Bad characters found ({len(found)}):")
         for offset, byte in found:
-            print(f"    offset {offset:#06x}  \\x{byte:02x}")
+            insn = insn_map.get(offset, "unknown")
+            print(f"    offset {offset:#06x}  \\x{byte:02x}  —  {insn}")
     else:
         chars = ", ".join(f"\\x{b:02x}" for b in sorted(badchars))
         print(f"[+] No bad characters detected  (checked: {chars})")
