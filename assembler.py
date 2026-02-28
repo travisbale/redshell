@@ -89,9 +89,12 @@ def apply_substitutions(asm_text: str, ip: str = None, port: int = None) -> str:
     return asm_text
 
 
-def assemble(asm_path: str, ip: str = None, port: int = None) -> bytes:
+def assemble(asm_path: str, ip: str = None, port: int = None, debug: bool = False) -> bytes:
     with open(asm_path, "r") as f:
         raw = f.read()
+
+    if debug:
+        raw = "int3\n" + raw
 
     raw = apply_substitutions(raw, ip, port)
     cleaned = strip_comments(raw)
@@ -124,7 +127,7 @@ def print_formats(shellcode: bytes, badchars: set, max_size: int = None) -> None
 
     # --- int3 check ---
     if shellcode[0] == 0xcc:
-        print("[!] WARNING: shellcode starts with INT3 (0xcc) — remove the debug breakpoint!")
+        print("[!] DEBUG MODE: shellcode starts with INT3 — do not use in production")
         print()
 
     # --- Size check ---
@@ -174,6 +177,10 @@ if __name__ == "__main__":
         "-m", dest="max_size", metavar="BYTES", type=int,
         help="warn if shellcode exceeds this size in bytes"
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="prepend INT3 (0xcc) to the shellcode for WinDbg debugging"
+    )
 
     args = parser.parse_args()
 
@@ -185,5 +192,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"[*] Assembling: {args.file}\n")
-    shellcode = assemble(args.file, args.lhost, args.lport)
+    shellcode = assemble(args.file, args.lhost, args.lport, args.debug)
     print_formats(shellcode, badchars, args.max_size)

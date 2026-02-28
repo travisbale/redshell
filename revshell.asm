@@ -1,6 +1,4 @@
 start:
-    ;int3                                ; DEBUG: Software breakpoint for WinDbg. REMOVE before use.
-
     ; Set up a fake stack frame. EBP will serve as our base pointer for storing
     ; resolved function addresses. We use EBP+offset as a stable scratch space
     ; throughout the shellcode so registers can be freely reused.
