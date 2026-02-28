@@ -111,39 +111,33 @@ def assemble(asm_path: str, ip: str = None, port: int = None, debug: bool = Fals
     return bytes(encoding)
 
 
-def print_formats(shellcode: bytes, badchars: set, max_size: int = None) -> None:
+def print_shellcode(shellcode: bytes) -> None:
     BYTES_PER_LINE = 16
-
-    # --- Exploit-ready Python format (16 bytes per line) ---
-    print("[ Exploit-ready ]")
-    chunks = [
-        shellcode[i: i + BYTES_PER_LINE]
-        for i in range(0, len(shellcode), BYTES_PER_LINE)
-    ]
+    chunks = [shellcode[i : i + BYTES_PER_LINE] for i in range(0, len(shellcode), BYTES_PER_LINE)]
     lines = ['b"' + "".join(f"\\x{b:02x}" for b in chunk) + '"' for chunk in chunks]
+    print("[ Exploit-ready ]")
     print("shellcode  = " + lines[0])
     for line in lines[1:]:
         print("shellcode += " + line)
     print()
 
-    # --- int3 check ---
-    if shellcode[0] == 0xcc:
+    if shellcode[0] == 0xCC:
         print("[!] DEBUG MODE: shellcode starts with INT3 — do not use in production")
         print()
 
-    # --- Size check ---
-    if max_size is not None:
-        remaining = max_size - len(shellcode)
-        if remaining < 0:
-            print(f"[!] Size exceeded: {len(shellcode)} bytes / {max_size} limit ({-remaining} bytes over)")
-        else:
-            print(f"[+] Size ok: {len(shellcode)} / {max_size} bytes ({remaining} bytes remaining)")
-        print()
 
-    # --- Bad character check ---
+def check_size(shellcode: bytes, max_size: int) -> None:
+    remaining = max_size - len(shellcode)
+    if remaining < 0:
+        print(f"[!] Size exceeded: {len(shellcode)} bytes / {max_size} limit ({-remaining} bytes over)")
+    else:
+        print(f"[+] Size ok: {len(shellcode)} / {max_size} bytes ({remaining} bytes remaining)")
+    print()
+
+
+def check_badchars(shellcode: bytes, badchars: set) -> None:
     found = [(i, b) for i, b in enumerate(shellcode) if b in badchars]
     if found:
-        # Build offset -> instruction map via Capstone
         insn_map = {}
         cs = Cs(CS_ARCH_X86, CS_MODE_32)
         for insn in cs.disasm(shellcode, 0):
@@ -167,28 +161,42 @@ if __name__ == "__main__":
         description="Keystone x86 assembler — assembles an .asm file and outputs exploit-ready shellcode."
     )
     parser.add_argument(
-        "file", nargs="?", default=default_asm,
-        help="path to .asm file (default: revshell.asm)"
+        "file",
+        nargs="?",
+        default=default_asm,
+        help="path to .asm file (default: revshell.asm)",
     )
     parser.add_argument(
-        "-i", dest="lhost", metavar="IP",
-        help="LHOST IP address — substitutes LHOST_DWORD in the asm"
+        "-i",
+        dest="lhost",
+        metavar="IP",
+        help="LHOST IP address — substitutes LHOST_DWORD in the asm",
     )
     parser.add_argument(
-        "-p", dest="lport", metavar="PORT", type=int,
-        help="LPORT port number — substitutes LPORT_WORD in the asm"
+        "-p",
+        dest="lport",
+        metavar="PORT",
+        type=int,
+        help="LPORT port number — substitutes LPORT_WORD in the asm",
     )
     parser.add_argument(
-        "-b", dest="badchars", metavar="CHARS", default="",
-        help='bad character list in msfvenom format, e.g. "\\x00\\x0a\\x0d"'
+        "-b",
+        dest="badchars",
+        metavar="CHARS",
+        default="",
+        help='bad character list in msfvenom format, e.g. "\\x00\\x0a\\x0d"',
     )
     parser.add_argument(
-        "-m", dest="max_size", metavar="BYTES", type=int,
-        help="warn if shellcode exceeds this size in bytes"
+        "-m",
+        dest="max_size",
+        metavar="BYTES",
+        type=int,
+        help="warn if shellcode exceeds this size in bytes",
     )
     parser.add_argument(
-        "--debug", action="store_true",
-        help="prepend INT3 (0xcc) to the shellcode for WinDbg debugging"
+        "--debug",
+        action="store_true",
+        help="prepend INT3 (0xcc) to the shellcode for WinDbg debugging",
     )
 
     args = parser.parse_args()
@@ -202,4 +210,10 @@ if __name__ == "__main__":
 
     print(f"[*] Assembling: {args.file}\n")
     shellcode = assemble(args.file, args.lhost, args.lport, args.debug)
-    print_formats(shellcode, badchars, args.max_size)
+
+    print_shellcode(shellcode)
+
+    if args.max_size is not None:
+        check_size(shellcode, args.max_size)
+
+    check_badchars(shellcode, badchars)
