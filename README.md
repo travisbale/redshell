@@ -1,4 +1,6 @@
-# redshell
+# Redshell
+
+<img src="logo.png" width="100">
 
 x86 Windows shellcode development environment for OSED (EXP-301).
 
