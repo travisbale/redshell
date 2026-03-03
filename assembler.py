@@ -126,6 +126,17 @@ def print_shellcode(shellcode: bytes) -> None:
         print()
 
 
+def write_cheader(shellcode: bytes, path: str) -> None:
+    """Write shellcode as a C unsigned char array to a header file."""
+    BYTES_PER_LINE = 12
+    chunks = [shellcode[i : i + BYTES_PER_LINE] for i in range(0, len(shellcode), BYTES_PER_LINE)]
+    lines = [", ".join(f"0x{b:02x}" for b in chunk) for chunk in chunks]
+    body = ",\n    ".join(lines)
+    with open(path, "w") as f:
+        f.write(f"static unsigned char shellcode[] = {{\n    {body}\n}};\n")
+    print(f"[+] C header written to {path}")
+
+
 def check_size(shellcode: bytes, max_size: int) -> None:
     remaining = max_size - len(shellcode)
     if remaining < 0:
@@ -155,7 +166,7 @@ def check_badchars(shellcode: bytes, badchars: set) -> None:
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_asm = os.path.join(script_dir, "payloads", "revshell.asm")
+    default_asm = os.path.join(script_dir, "payloads", "revshell_strcpy.asm")
 
     parser = argparse.ArgumentParser(
         description="Keystone x86 assembler — assembles an .asm file and outputs exploit-ready shellcode."
@@ -198,6 +209,11 @@ if __name__ == "__main__":
         action="store_true",
         help="prepend INT3 (0xcc) to the shellcode for WinDbg debugging",
     )
+    parser.add_argument(
+        "--cheader",
+        metavar="FILE",
+        help="write shellcode as a C unsigned char array to FILE (for use with runner.c)",
+    )
 
     args = parser.parse_args()
 
@@ -217,3 +233,6 @@ if __name__ == "__main__":
         check_size(shellcode, args.max_size)
 
     check_badchars(shellcode, badchars)
+
+    if args.cheader is not None:
+        write_cheader(shellcode, args.cheader)

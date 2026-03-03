@@ -16,6 +16,10 @@ build/
 *.elf
 *.lst
 
+# Makefile build artifacts
+runner.exe
+shellcode.h
+
 # Editor
 .vscode/
 .idea/
