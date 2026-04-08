@@ -2,7 +2,7 @@
   <img src="logo.png" alt="Redshell" width="350" />
 </p>
 
-x86 Windows shellcode development environment for OSED (EXP-301).
+Redshell is an x86 Windows shellcode development environment for OSED (EXP-301). It includes stageless reverse shell payloads with various bad character constraints and a Keystone-based assembler with runtime substitution and bad character checking.
 
 ## Contents
 
