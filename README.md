@@ -1,6 +1,6 @@
-# Redshell
-
-<img src="logo.png" width="100">
+<p align="center">
+  <img src="logo.png" alt="Redshell" width="350" />
+</p>
 
 x86 Windows shellcode development environment for OSED (EXP-301).
 
